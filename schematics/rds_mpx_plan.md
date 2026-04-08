@@ -2,1069 +2,507 @@
 
 ## Cel
 
-Dodac funkcje odbioru i dekodowania RDS na podstawie sygnalu MPX z TEA5767 z wykorzystaniem jednego wolnego wejscia ADC Flippera bez konfliktu z I2C i liniami sterujacymi PAM8406.
+Odbiór i dekodowanie RDS z sygnalu MPX z TEA5767 na jednym wolnym wejsciu ADC Flippera (PA4)
+bez konfliktu z I2C i liniami sterujacymi PAM8406.
 
-Docelowy procesor:
-- STM32WB55RGV6TR
+Procesor docelowy: STM32WB55RGV6TR (Cortex-M4 z DSP/FPU).
 
-Docelowe zasoby CPU do wykorzystania:
-- ADC z DMA do ciaglego zrzutu probek
+Zasoby CPU wykorzystane w implementacji:
+- ADC z DMA do ciaglego zrzutu probek (228 kS/s)
 - DSP i FPU rdzenia Cortex-M4 do filtracji i obrobki sygnalu
-- minimalizacja obciazenia CPU przez przetwarzanie blokowe zamiast probka po probce w przerwaniu
+- przetwarzanie blokowe (1024 probki) zamiast probka po probce w przerwaniu
+
+Status: **zaimplementowane i dzialajace**. Dekoder odczytuje PI, PS, RT, PTY z nadajnikow FM.
+
+---
 
 ## Wybrany pin
 
-Wybrane wejscie ADC:
+Wejscie ADC:
 - pin 4 Flippera
-- PA4
-- ADC1_IN9
+- PA4 / ADC1_IN9
 - nazwa sygnalu na PCB: RDS_MPX_ADC
 
 Powod wyboru:
-- nie koliduje z I2C na PC0 i PC1
-- nie koliduje z liniami PAM_MUTE, PAM_SHDN i PAM_MODE_ABD na PB3, PB2 i PC3
-- jest potwierdzonym wejsciem ADC w STM32WB55RGV6TR
+- nie koliduje z I2C na PC0/PC1
+- nie koliduje z liniami PAM_MUTE, PAM_SHDN, PAM_MODE_ABD na PB3, PB2, PC3
+- potwierdzony kanal ADC w STM32WB55RGV6TR
 
-## Funkcja sprzetowa
+---
 
-Sekcja ma sluzyc do odbioru sygnalu MPX z TEA5767 i przygotowania go do probkowania przez ADC Flippera na potrzeby dekodowania RDS.
+## Analog front-end (MCP6001)
 
-Nazwy robocze sekcji:
-- RDS z MPX
-- MPX front-end
-- RDS_MPX_ADC
+### Cel sekcji
 
-## Plan analog front-end
+Wzmocnic skladowa RDS (57 kHz) z wyjscia MPXO TEA5767 przed podaniem na ADC PA4 Flippera.
+Bez wzmacniacza sygnal RDS to okolo 6.7 mV peak, co daje zaledwie 8 LSB na 12-bitowym ADC.
+Po wzmocnieniu x6 z filtrem HP uzyskujemy okolo 41 LSB (+14 dB poprawa kwantyzacji).
 
-### Kluczowe odkrycia z pomiarow (RRD-102BC)
+Pelna dokumentacja obwodu, weryfikacja parametrow MCP6001 i analiza clippingu:
+-> [pcb_v1_1_design_notes.md](pcb_v1_1_design_notes.md), sekcja "RDS Analog Front-End z MCP6001"
 
-Pomiary praktyczne wykazaly, ze modul TEA5767 na PCB RRD-102BC ma juz wlasne elementy toru wyjsciowego MPX, a dodatkowe elementy na naszej plytce moga pogorszyc sygnal.
+### Parametry wyjscia MPXO z datasheetu TEA5767
 
-Zaobserwowane fakty:
-- po dolaczeniu dodatkowego kondensatora odsprzegajacego na MPX przebieg na wyjsciu zanikl,
-- bez dodatkowego kondensatora przebieg jest obecny i poprawny,
-- dolaczenie zewnetrznego dzielnika 100k/100k do 3.3 V i GND (punkt srodkowy do MPX) obnizalo punkt pracy i amplitude,
-- przy takim polaczeniu zmierzone napiecie DC bylo okolo 0.8 V,
-- zmierzona rezystancja widziana od MPX do zasilania i do masy byla okolo 50k, co wskazuje na polaczenie rownolegle z rezystorami juz obecnymi w module,
-- bez dodatkowych rezystorow pomiar MPX do VCC i GND dawal symetrycznie okolo 5.3 MOhm,
-- bez dodatkowych rezystorow punkt DC na MPX byl okolo 1.2 V,
-- bez dodatkowych rezystorow amplituda na oscyloskopie byla wyzsza, okolo 200 do 300 mV.
+- DC bias VMPXO: 680 do 950 mV, typowo 815 mV
+- AC output (mono, delta_f = 22.5 kHz): 60 do 90 mV, typowo 75 mV
+- Output resistance Ro: max 500 Ohm
+- Sink current Isink: max 30 uA
+- Skladowa RDS na MPXO: okolo 6.7 mV peak (dewiacja RDS +/- 2 kHz vs testowa 22.5 kHz = 8.9%)
 
-Wniosek praktyczny:
-- wyjscie MPX nie powinno byc dodatkowo dociagane dzielnikiem 100k/100k na naszej plytce,
-- nie nalezy dodawac "na slepo" kolejnego kondensatora odsprzegajacego MPX,
-- wariant startowy powinien byc mozliwie wysokoomowy i niedociagajacy.
+### Obwod projektowy
 
-### Wariant startowy
+Wzmacniacz nieodwracajacy MCP6001 (SOT-23-5) zasilany z 3.3V_TEA:
 
-Najprostszy wariant do pierwszych prob:
-- pobrac sygnal MPX z TEA5767
-- na bazie aktualnych pomiarow NIE dokladac zewnetrznego dzielnika 100k/100k do MPX
-- na bazie aktualnych pomiarow NIE dokladac dodatkowego kondensatora odsprzegajacego MPX bez potwierdzenia na oscyloskopie
-- najpierw zmierzyc przebieg bezposrednio i ocenic czy naturalny punkt DC z modulu (okolo 1.2 V) i amplituda (okolo 200 do 300 mV) mieszcza sie bezpiecznie w zakresie ADC 0 do 3.3 V
-- dopiero jesli zajdzie potrzeba, dodawac bufor o bardzo duzej impedancji wejsciowej
+| Ref  | Wartosc    | Funkcja                                    |
+|------|------------|--------------------------------------------|
+| C1   | 1 uF       | coupling cap — zdejmuje DC 815 mV z TEA    |
+| C2   | 2.2 nF     | HPF cap — odcina audio, przepuszcza RDS    |
+| R1   | 2.2 kOhm   | HPF shunt + sciezka DC bias               |
+| Rb1  | 100 kOhm   | bias divider gorny (3.3V → Vbias)         |
+| Rb2  | 100 kOhm   | bias divider dolny (Vbias → GND)          |
+| Cb   | 100 nF     | AC ground na nodzie bias                   |
+| Rf   | 10 kOhm    | feedback resistor                          |
+| Rg   | 2 kOhm     | gain set resistor                          |
+| C4   | 100 nF     | bypass VDD MCP6001                         |
 
-Cel wariantu startowego:
-- sprawdzic, czy MPX z TEA5767 ma wystarczajaca jakosc do probkowania i dekodowania RDS bez dodatkowego aktywnego toru analogowego
+Kluczowe parametry obwodu:
+- HPF: fc = 1 / (2*pi*C2*R1) = 33 kHz → odcina audio i pilota, przepuszcza 57 kHz z -1.3 dB
+- Wzmocnienie: Av = 1 + Rf/Rg = 1 + 10k/2k = **x6**
+- DC na wyjsciu: Vbias = 3.3V / 2 = **1.65 V** (srodek zakresu ADC)
+- Worst case output (800 mV MPX): 2.44 V p-p wokol 1.65 V → od 0.43 V do 2.87 V → **nie clipuje**
 
-### Wariant preferowany
+### Weryfikacja MCP6001
 
-Preferowany wariant do wersji bardziej dopracowanej:
-- uzyc MCP6001 jako bufora i wzmacniacza nieodwracajacego
-- ustawic przesuniecie DC na polowe zakresu ADC
-- ustawic wzmocnienie okolo x4 jako punkt startowy do testow
+Potwierdzone z datasheetu (DS20001733L):
+- GBW = 1 MHz → f_-3dB = 167 kHz → gain na 57 kHz = 5.68x (strata 5.3%)
+- Slew rate = 0.6 V/us → worst case potrzeba 0.44 V/us (73% SR) → **przechodzi**
+- Phase margin: 90° przy G=+1, stabilny przy G=+6
+- VCM = 1.65 V < crossover 2.2 V → pracujemy na jednym stopniu wejsciowym
+- CL: ~15 pF (ADC + trasa) << 100 pF limit
 
-Dlaczego MCP6001:
-- rail-to-rail
-- pracuje od 1.8 V do 6 V
-- nadaje sie do pojedynczego zasilania 3.3 V
-- jest wystarczajacy do pasma RDS przy 57 kHz
+---
 
-Uwagi praktyczne:
-- wzmocnienie x4 to punkt startowy, nie wartosc ostateczna
-- nalezy przewidziec mozliwosc korekty rezystorow wzmacniacza po pierwszych pomiarach MPX z rzeczywistego TEA5767
-- wejscie ADC powinno miec lokalny rezystor szeregowy ochronny i maly kondensator tylko jesli nie pogorszy to zbytnio pasma dla 57 kHz
-- kluczowe jest, aby wejscie front-endu nie obciazalo MPX; preferowany jest bufor o wysokiej impedancji wejsciowej zamiast pasywnego dzielnika podpietego bezposrednio do MPX
-
-## Zalozenia dla sygnalu
+## Sygnal MPX
 
 Sygnal MPX zawiera:
-- audio L plus R w niskim pasmie
+- audio L+R w pasmie do okolo 15 kHz
 - pilot 19 kHz
-- skladnik stereo L minus R wokol 38 kHz
-- RDS na 57 kHz
-
-Wniosek:
-- tor analogowy i probkowanie nie moga za mocno ucinac pasma w okolicy 57 kHz
-- prosty filtr dolnoprzepustowy na wejsciu ADC, jesli w ogole bedzie, musi miec czestotliwosc graniczna wyraznie powyzej 57 kHz
-
-## Plan probkowania ADC
+- stereo L-R wokol 38 kHz (DSB-SC)
+- RDS na podnosnej 57 kHz (= 3 x pilot)
 
-Strategia:
-- ADC pracuje w trybie ciaglym
-- DMA zapisuje probki do bufora kolowego
-- obrobka sygnalu jest wykonywana blokowo po polowie i calosci bufora DMA
+Wniosek: tor analogowy i probkowanie nie moga ucinac pasma ponizej 57 kHz.
+HPF fc=33 kHz w obwodzie MCP6001 tlumi audio ale przepuszcza 57 kHz.
 
-Zalecenia robocze:
-- start od czestotliwosci probkowania z zapasem ponad 114 kHz, praktycznie lepiej 171 kHz do 228 kHz lub wyzej, jesli firmware i budzet CPU na to pozwoli
-- format probek 12-bit ADC z zapisem do 16-bit bufora
-- przetwarzanie na blokach o stalej dlugosci, aby ograniczyc narzut przerwan
+---
 
-Cel:
-- nie obciazac mocno CPU obsluga pojedynczych probek
-- wykorzystac DMA do transportu danych i DSP/FPU do obliczen na blokach
+## Probkowanie ADC
+
+### Sample rate: 228 kS/s
 
-### Proponowany sample rate
-
-Rekomendacja startowa dla runtime:
-- 228 kS/s nominal
-
-Uzasadnienie matematyczne:
-- nosna RDS: f_RDS = 57 kHz = 3 x 19 kHz,
-- bitrate RDS: R_s = 1187.5 bit/s = 57 kHz / 48,
-- dla f_s = 228 kS/s mamy:
-- f_s / f_RDS = 228000 / 57000 = 4 probki na okres 57 kHz,
-- f_s / R_s = 228000 / 1187.5 = 192 probki na symbol.
-
-To jest glowny powod wyboru 228 kS/s:
-- dostajemy calkowite relacje probkowania do nosnej i do symbolu,
-- upraszcza to generator lokalnej nosnej 57 kHz,
-- upraszcza to synchronizacje symbolowa i testy debug,
-- zmniejsza ryzyko bledu numerycznego wzgledem bardziej przypadkowych sample rate,
-- daje wiekszy zapas probek na okres nosnej i na symbol niz 171 kS/s.
-
-Porownanie z 171 kS/s:
-- 171000 / 57000 = 3 probki na okres 57 kHz,
-- 171000 / 1187.5 = 144 probki na symbol,
-- jest to rowniez bardzo wygodna wartosc obliczeniowo,
-- ale daje mniejszy zapas probek na okres nosnej i na symbol niz 228 kS/s.
-
-Powod wyboru:
-- jest wyraznie powyzej minimum Nyquist dla 57 kHz,
-- daje dokladnie 4 probki na okres nosnej 57 kHz,
-- upraszcza obliczenia i daje wiekszy zapas dla synchronizacji symbolowej,
-- zwieksza obciazenie CPU i przeplyw danych wzgledem 171 kS/s, ale pozostaje wartoscia bardzo wygodna obliczeniowo.
-
-Rekomendacja zapasowa:
-- jesli obciazenie CPU okaze sie zbyt wysokie, obnizyc do 171 kS/s w trybie testowym,
-- 171 kS/s traktowac jako tryb alternatywny o mniejszym koszcie obliczeniowym.
-
-Wniosek implementacyjny:
-- pierwszy target runtime: 228 kS/s,
-- pierwszy target debug capture: 228 kS/s,
-- drugi target debug / eksperymentalny: 171 kS/s.
-
-### Proponowany rozmiar buforow DMA
-
-Rekomendowany uklad buforow:
-- jeden bufor kolowy DMA: 2048 probek typu uint16_t,
-- przetwarzanie blokowe po 1024 probki na half-transfer i full-transfer.
-
-Rozmiary:
-- 2048 probek x 2 bajty = 4096 bajtow bufora ADC DMA,
-- blok obrobki = 1024 probki = 2048 bajtow surowych danych.
-
-Czas jednego bloku przy 228 kS/s:
-- 1024 / 228000 ~= 4.49 ms
-
-Wniosek:
-- modul dostaje jeden blok do obrobki mniej wiecej co 4.5 ms,
-- to jest wystarczajaco rzadko, aby nie zalewac CPU przerwaniami,
-- a jednoczesnie wystarczajaco czesto, aby utrzymac ciaglosc dekodowania.
-
-Wariant alternatywny tylko jesli zajdzie potrzeba:
-- 4096 probek DMA z blokami po 2048 probek,
-- mniejszy narzut schedulerowy kosztem wiekszej latencji.
-
-Domyslna rekomendacja:
-- runtime: 2048 probek DMA / 1024 probki na blok.
-
-Wygodna relacja do symboli RDS:
-- przy 228 kS/s i 1024 probkach na blok mamy 1024 / 192 ~= 5.33 symbolu RDS na blok,
-- blok nie jest calkowita wielokrotnoscia symbolu, wiec dekoder musi trzymac stan miedzy blokami,
-- to jest poprawne i oczekiwane,
-- warto przechowywac faze symbol clock i reszte probek z poprzedniego bloku.
-
-### Szacowane uzycie RAM
-
-Szacunek dla pierwszej implementacji runtime bez przesadnej rozbudowy:
-
-1. Bufor DMA ADC:
-- 2048 x uint16_t = 4096 B
-
-2. Bufor roboczy jednego bloku po konwersji do sygnalu signed:
-- 1024 x int16_t = 2048 B
-
-3. Bufor / workspace dla filtracji i obrobki blokowej:
-- okolo 2048 B do 4096 B
-
-4. Stan dekodera RDS, historia bitow, synchronizacja blokow, PI / PS / RT:
-- okolo 512 B do 1024 B
-
-5. Debug staging buffer dla lekkiego dumpa lub kolejkowania zapisu:
-- okolo 1024 B do 2048 B
-
-Suma praktyczna dla wersji startowej:
-- minimum runtime bez dumpa: okolo 8 KB
-- komfortowy budzet runtime z podstawowym debugiem: okolo 10 KB do 12 KB
-
-Rekomendacja projektowa:
-- przyjac budzet 12 KB RAM dla modulu RDS jako bezpieczny target planistyczny,
-- jesli implementacja zacznie rosnac powyzej 16 KB, nalezy uproscic pipeline albo debug.
-
-## Plan dekodowania RDS na CPU
-
-Docelowy kierunek implementacji:
-- pobrac strumien MPX przez ADC
-- cyfrowo odfiltrowac okolice 57 kHz
-- wykonac odzyskanie podnosnej RDS na podstawie zaleznosci od pilota 19 kHz albo przez bezposrednia metode cyfrowa
-- zdemodulowac BPSK RDS
-- odzyskac zegar symbolowy
-- skladac bloki RDS i sprawdzac syndromy
-
-Zasoby STM32WB55RGV6TR, ktore warto wykorzystac:
-- FPU do szybkich obliczen na float, jesli finalny algorytm bedzie tego potrzebowal
-- DSP instructions do filtrow FIR/IIR, mieszania i korelacji
-- DMA do stalego odbioru probek bez duzego obciazenia CPU
-
-Wniosek implementacyjny:
-- dekoder ma byc projektowany jako pipeline blokowy oparty o DMA i DSP
-- celem nie jest dekodowanie w stylu tight loop na przerwaniu od kazdej probki
-- pierwsza wersja ma byc zoptymalizowana pod stabilny odbior PS, nie pod pelny feature set RDS.
-
-### Wzory robocze dla toru dekodowania
-
-1. Usuniecie offsetu DC z ADC:
-- x_ac[n] = x_adc[n] - mean(x_adc)
-
-2. Cyfrowe zejscie z 57 kHz do baseband:
-- I[n] = x_ac[n] * cos(2 * pi * f_0 * n / f_s)
-- Q[n] = x_ac[n] * -sin(2 * pi * f_0 * n / f_s)
-- gdzie f_0 = 57 kHz
-
-3. Filtracja dolnoprzepustowa po mieszaniu:
-- I_lp[n] = LPF(I[n])
-- Q_lp[n] = LPF(Q[n])
-- pasmo uzyteczne po demodulacji powinno obejmowac okolice bitrate 1187.5 Hz i zapas na synchronizacje
-
-4. Czestotliwosc symbolowa RDS:
-- R_s = 1187.5 bit/s = 57 kHz / 48
-- liczba probek na symbol:
-- N_s = f_s / R_s
-- dla 171 kS/s: N_s = 144
-- dla 228 kS/s: N_s = 192
-
-5. Integracja po symbolu / matched filter w wersji startowej:
-- z[k] = sum od m=0 do N_s-1 z_bb[k * N_s + m]
-- gdzie z_bb[n] = I_lp[n] + j * Q_lp[n]
-
-6. Prosta decyzja bitowa przy detekcji roznicowej BPSK:
-- d[k] = sign(real(z[k] * conj(z[k-1])))
-- taka postac pomaga, gdy absolutna faza nosnej nie jest jeszcze idealnie ustalona
-
-7. Pilot 19 kHz jako referencja pomocnicza:
-- f_RDS = 3 * f_pilot
-- jesli pilot jest stabilnie wykryty, lokalna nosna 57 kHz moze byc odzyskana jako trzecia harmoniczna pilota
-- wtedy faza pomocnicza spelnia relacje:
-- phi_RDS ~= 3 * phi_pilot
-
-8. Rozdzielczosc czestotliwosci dla analizy FFT bloku 1024:
-- delta_f = f_s / N
-- dla 228 kS/s i N = 1024:
-- delta_f ~= 222.7 Hz
-- to wystarcza do potwierdzenia obecnosci pilota 19 kHz i energii w okolicy 57 kHz podczas debugowania
-
-Wniosek praktyczny:
-- 228 kS/s nie zostalo wybrane dlatego, ze ADC nie potrafi szybciej,
-- zostalo wybrane dlatego, ze daje bardzo wygodne relacje calkowite do 57 kHz i 1187.5 bit/s,
-- a jednoczesnie daje wiecej probek na okres nosnej i na symbol.
-
-### Co oznacza priorytet PS zamiast pelnego RDS
-
-PS oznacza Program Service:
-- to krotka nazwa stacji,
-- standardowo 8 znakow ASCII,
-- w praktyce to tekst typu RMF FM, ZET CHR, JAZZRAD.
-
-Dlaczego PS najpierw:
-- jest najbardziej widocznym efektem dla uzytkownika,
-- wymaga znacznie mniejszego zakresu funkcji niz pelna obsluga wszystkich grup RDS,
-- dobrze nadaje sie jako pierwszy test stabilnosci calego toru: ADC, DMA, synchronizacji, detekcji blokow i korekcji.
-
-Co zwykle wchodzi do pelnego feature set RDS:
-- PI: Program Identification,
-- PS: Program Service,
-- PTY: Program Type,
-- RT: RadioText,
-- CT: Clock Time,
-- TP i TA: flagi traffic,
-- AF: Alternative Frequencies,
-- obsluga wiekszej liczby typow grup i ich wariantow.
-
-Dlaczego nie pelny set od razu:
-- najtrudniejsza czesc nie lezy w samym parsowaniu pol, tylko w stabilnym odzyskaniu danych z analogowego MPX,
-- PS pozwala szybko zweryfikowac, czy odbiornik lapie poprawne bloki 0A lub 0B,
-- RT, AF i pozostale elementy wymagaja dluzszego utrzymania synchronizacji, skladania danych z wielu grup i lepszej obslugi bledow,
-- jesli od razu wrzucimy caly stos funkcji, trudniej bedzie odroznic blad DSP od bledu parsera protokolu,
-- podejscie PS-first skraca czas do pierwszego wiarygodnego wyniku i upraszcza debug.
-
-Minimalny cel dla pierwszej wersji:
-- stabilnie wykryc pilot 19 kHz,
-- stabilnie wykryc energie i lock dla 57 kHz,
-- odzyskac poprawne bloki RDS,
-- pokazac PI i PS na ekranie,
-- dopiero potem rozszerzac na RT, PTY, AF i pozostale grupy.
-
-### Porownanie z SAA6588
-
-SAA6588 jest bardzo dobrym wzorcem architektury dekodera RDS:
-- pokazuje prawidlowy podzial funkcji,
-- pokazuje kolejnosc przetwarzania,
-- pokazuje, jakie mechanizmy stabilizuja odbior przy slabym lub zaszumionym sygnale.
-
-Nie nalezy jednak kopiowac go 1:1:
-- SAA6588 ma specjalizowany tor analogowy i dedykowane bloki cyfrowe,
-- my budujemy dekoder software na ogolnym MCU z ADC i DMA,
-- dlatego kopiujemy architekture i logike, a nie konkretna implementacje ukladowa.
-
-Mapowanie blokow SAA6588 na nasz projekt:
-
-1. Selection of the RDS/RBDS signal from MPX:
-- SAA6588 wybiera pasmo RDS z MPX w torze analogowym,
-- u nas odpowiada za to analog front-end plus cyfrowa filtracja pasmowa wokol 57 kHz.
-
-2. 57 kHz carrier regeneration:
-- SAA6588 robi regeneracje nosnej 57 kHz przez Costas loop,
-- u nas trzeba przewidziec dwa tryby:
-- prostszy tryb startowy: referencja 57 kHz z pilota 19 kHz, czyli 3 x pilot,
-- tryb docelowy: cyfrowa petla typu Costas lub rownowazna synchronizacja fazy na 57 kHz.
-
-3. Demodulation of the RDS signal:
-- SAA6588 po band-pass i comparatorze odzyskuje strumien danych,
-- u nas odpowiednikiem jest cyfrowe mieszanie I/Q, LPF i detekcja DBPSK.
-
-4. Symbol decoding and symbol integration:
-- SAA6588 jawnie integruje po jednym okresie zegara RDS,
-- to bardzo wazna wskazowka dla nas,
-- nasz matched filter lub integrator powinien pracowac na oknie jednego symbolu:
-- N_s = f_s / 1187.5
-- czyli dla 228 kS/s mamy N_s = 192.
-
-5. Block detection:
-- SAA6588 stale przeszukuje strumien pod katem 26-bitowych blokow i offset words,
-- u nas trzeba przewidziec dokladnie ten sam model logiczny,
-- najpierw sliding syndrome search bit po bicie,
-- po zlapaniu synchronizacji przejscie na krok co 26 bitow.
-
-6. Error detection and correction:
-- SAA6588 wykorzystuje syndromy i korekcje bledow burst do 5 bitow,
-- to nie jest opcjonalny dodatek,
-- to jest centralna czesc prawdziwego dekodera RDS,
-- nasz plan powinien od razu przewidywac syndrome, offset words i status: valid, corrected, uncorrectable.
-
-7. Fast block synchronization and synchronization hold:
-- SAA6588 synchronizuje sie po dwoch kolejnych poprawnych blokach w prawidlowej sekwencji,
-- potem utrzymuje sync przez flywheel,
-- to jest bardzo dobry wzorzec dla nas,
-- nie wystarczy pojedynczy poprawny blok,
-- trzeba miec osobny stan SEARCH, PRE_SYNC, SYNC oraz licznik bledow do utrzymania synchronizacji.
-
-8. Bit slip correction:
-- SAA6588 koryguje przesuniecie o +1 lub -1 bit,
-- to jest bardzo cenna wskazowka praktyczna,
-- nasz software dekoder tez powinien sprawdzac wariant nominalny oraz przesuniety o jeden bit w lewo i w prawo, jesli jakosc lock spada.
-
-9. Signal quality and multipath information:
-- SAA6588 nie ogranicza sie do samych danych RDS,
-- mierzy tez jakosc sygnalu i sytuacje wielodrogowe,
-- u nas nie musimy kopiowac tego 1:1, ale warto miec chociaz software metrics:
-- pilot_snr,
-- rds_band_power,
-- corrected_block_rate,
-- uncorrectable_block_rate,
-- sync_loss_count.
-
-10. Mode control and data output pacing:
-- SAA6588 ma tryby pracy, fast PI search, overflow control i sygnal DAVN,
-- to jest bardzo dobra lekcja architektoniczna,
-- u nas oznacza to, ze dekoder nie powinien bezposrednio zalewac UI czy glownej aplikacji kazdym blokiem,
-- trzeba rozdzielic warstwe demodulacji od warstwy publikacji wynikow,
-- publikowac tylko stabilne i istotne zmiany, np. nowy PI, nowy PS, utrata sync.
-
-Wniosek:
-- tak, zdecydowanie warto uczyc sie na SAA6588,
-- ale jako na referencji architektury dekodera, nie jako na gotowym schemacie do przepisania linia po linii.
-
-### Co dokladnie warto przejac z SAA6588
-
-Elementy, ktore warto przejac prawie bez zmian na poziomie koncepcji:
-- pasmowe wydzielenie 57 kHz,
-- odzyskanie nosnej,
-- integracja po symbolu,
-- detekcja roznicowa bitow,
-- syndrome-based block detection,
-- korekcja bledow i status corrected versus uncorrectable,
-- synchronizacja po sekwencji blokow, nie po pojedynczym trafieniu,
-- flywheel do utrzymania synchronizacji,
-- bit-slip correction,
-- metryki jakosci sygnalu i sterowanie trybem pracy.
-
-Elementy, ktorych nie warto kopiowac doslownie:
-- analogowy switched-capacitor band-pass filter,
-- comparator jako osobny blok sprzetowy przed demodulatorem,
-- szczegoly czasowe I2C/DAVN charakterystyczne dla gotowego ukladu scalonego,
-- wewnetrzne rejestry i nazwy trybow wynikajace z tej konkretnej implementacji Philipsa.
-
-### Zaktualizowany docelowy model naszego dekodera
-
-Na bazie SAA6588 nasz dekoder powinien miec warstwy:
-
-1. Front-end sygnalowy:
-- ADC DMA,
-- usuniecie DC,
-- pomiar poziomu i clippingu,
-- cyfrowy band-pass lub zejscie do baseband.
-
-2. Demodulator:
-- regeneracja 57 kHz,
-- I/Q,
-- LPF,
-- symbol timing,
-- DBPSK differential decode.
-
-3. Decoder core:
-- shift register bitow,
-- syndrome search,
-- block type A, B, C, C', D,
-- korekcja bledow,
-- sync state machine,
-- flywheel,
-- bit-slip recovery.
-
-4. Parser danych RDS:
-- PI,
-- PS,
-- potem PTY, RT, AF i dalsze grupy.
-
-5. Warstwa raportowania do aplikacji FM:
-- publikacja tylko ustabilizowanych danych,
-- zdarzenia lock i loss,
-- metryki jakosci dla debug i ewentualnej diagnostyki UI.
-
-Najwazniejszy wniosek projektowy z SAA6588:
-- prawdziwy dekoder RDS to nie jest tylko filtr 57 kHz plus parser grup,
-- to pelny pipeline z odzyskiwaniem nosnej, synchronizacja, korekcja bledow i polityka utrzymania lock.
-
-### Maszyna stanow dekodera inspirowana SAA6588
-
-Docelowe stany runtime:
-- SEARCH
-- PRE_SYNC
-- SYNC
-- LOST
+Wybor uzasadniony:
+- f_s / f_RDS = 228000 / 57000 = **4 probki na okres nosnej** → upraszcza demodulacje
+- f_s / R_s = 228000 / 1187.5 = **192 probki na symbol** → duzy zapas
+- calkowite relacje do nosnej i bitrate eliminuja blad numeryczny
+- wyraznie powyzej minimum Nyquist dla 57 kHz
+
+### Bufor DMA: 2048 probek / bloki po 1024
+
+- 2048 x uint16_t = 4096 B bufora kolowego DMA
+- przerwanie na half-transfer (1024 probek) i full-transfer (2048 probek)
+- blok obrobki = 1024 probki = ~4.49 ms przy 228 kS/s
+- ~5.33 symbolu RDS na blok (dekoder trzyma stan miedzy blokami)
+
+### Implementacja (RDSAcquisition)
+
+Plik: `RDS/RDSAcquisition.h`, `RDS/RDSAcquisition.c`
+
+Timer:
+- TIM1, zegar 64 MHz
+- AutoReload = 280 (divider 281) → actual rate = 227757 Hz (+0.1% blad)
+- Update trigger → ADC TRGO
+
+ADC:
+- Scale: FuriHalAdcScale2048 (10-bit, zakres 0-2048)
+- Sampling time: 12.5 cykli
+- Trigger: TIM1 TRGO
+- DMA: REG_DMA_TRANSFER_UNLIMITED (circular)
+
+DMA:
+- DMA1 Channel 1
+- Circular, periph-to-memory
+- 16-bit halfword
+- Przerwania: HT (half-transfer) + TC (transfer complete)
+
+Przetwarzanie:
+- Timer-driven callback co 2 ms
+- Backpressure: pending > 24 blocks → max 3 blocks/tick, > 12 → max 2, else 1
+- Pending limit: 24 blokow
+
+---
+
+## Architektura dekodera (wzorzec SAA6588)
+
+SAA6588 jest ureferencyjaczem architektury dekodera RDS. Nasz dekoder przejmuje koncepcje:
+
+| Blok SAA6588 | Nasza implementacja |
+|---|---|
+| Selection of RDS from MPX | MCP6001 HPF + cyfrowy I/Q mixer + 3-pole LPF |
+| 57 kHz carrier regeneration | NCO 57 kHz (fast path: direct demux przy 228k) |
+| Demodulation | I/Q mieszanie, LPF, DBPSK differential decode |
+| Symbol integration | Integrator po 192 probkach z timing recovery |
+| Block detection | Sliding syndrome search (SEARCH) / krok co 26 bitow (SYNC) |
+| Error correction | Burst 1-5 bit, tablica 120 wpisow, syndrome-based |
+| Synchronization | SEARCH → PRE_SYNC(3) → SYNC → LOST |
+| Flywheel | Limit 20 blokow uncorrectable |
+| Bit slip correction | ±1 bit retry w stanie SYNC |
+| Signal quality | pilot_level, rds_band_level, lock_quality — wszystko Q8/Q16 |
+| Data output | Circular event queue (8 slotow), publication on change |
+
+Warstwy naszego dekodera:
+
+1. **RDSAcquisition** — ADC + DMA + Timer, produkuje bloki 1024 probek uint16_t
+2. **RDSDsp** — demodulacja 57 kHz, LPF, timing recovery, DBPSK → strumien bitow
+3. **RDSCore** — syndrome search, korekcja, sync state machine, parser grup → zdarzenia
+4. **radio.c** — konsumuje zdarzenia, wyswietla PI/PS/RT w UI
+
+---
+
+## DSP Pipeline (RDSDsp)
+
+Plik: `RDS/RDSDsp.h`, `RDS/RDSDsp.c`
+
+Caly pipeline jest integer-only (Q8/Q16/Q32). FPU nie jest uzywany w hot loop.
+
+### Przetwarzanie per-sample (228k razy na sekunde):
+
+**1. Usuniecie DC:**
+```
+centered = sample - adc_midpoint
+centered_q8 = centered << 8
+dc_estimate_q8 += (centered_q8 - dc_estimate_q8) >> 6   (EMA, alpha=1/64)
+hp = centered_q8 - dc_estimate_q8
+```
+
+**2. Demodulacja 57 kHz:**
+- Fast path (228 kHz): bezposredni demux na 4 fazy (cos/sin lookup przez sample_mod4)
+- Generic path: NCO z carrier_phase_q32, lookup tables rds_carrier_cos_q8[16] / rds_carrier_sin_q8[16]
+- mixed_i = (hp * cos) >> 8, mixed_q = (-hp * sin) >> 8
+
+**3. Trzystopniowa kaskada IIR LPF (alpha=1/8 kazdy stopien):**
+```
+s1 += (mixed - s1) >> 3
+s2 += (s1 - s2) >> 3
+s3 += (s2 - s3) >> 3
+```
+- -3 dB przy ~2500 Hz, 18 dB/oktawe rolloff
+- Odrzuca stereo L-R (4+ kHz baseband) i 38 kHz leakage
+
+**4. Integracja po symbolu:**
+```
+integrator_i += lpf_state3_i
+integrator_q += lpf_state3_q
+symbol_phase_q16 += step
+```
+
+**5. Timing recovery (early-late):**
+- Okno krawedzi: 1/8 okresu symbolu na kazdej stronie
+- early_energy i late_energy akumulowane z |I|+|Q|
+- Bled: late - early → timing_adjust_q16 (clamped ±6.25% okresu)
+- Noise gate: jesli |error| < (avg_vector_mag >> 4), step = 0
+- cached_symbol_period_q16 uaktualniany kazdym symbolem
+
+**6. Decyzja bitowa (DBPSK):**
+```
+dot = prev_I * curr_I + prev_Q * curr_Q   (int64_t)
+bit = (dot < 0) ? 1 : 0
+```
+
+**7. Metryki sygnalu (wszystko Q8/Q16, EMA):**
+
+| Metryka | Format | EMA shift | Co mierzy |
+|---|---|---|---|
+| pilot_level_q8 | Q8 | 8 | amplituda 19 kHz |
+| rds_band_level_q8 | Q8 | 8 | |I|+|Q| po LPF |
+| avg_abs_hp_q8 | Q8 | 8 | amplituda HP |
+| dc_estimate_q8 | Q8 | 6 | offset DC |
+| symbol_confidence_avg_q16 | Q16 | 7 | jakosc decyzji (0-65535) |
+| block_confidence_avg_q16 | Q16 | 5 | jakosc bloku |
+
+### Stale DSP
+
+| Parametr | Wartosc | Format |
+|---|---|---|
+| RDS_BITRATE_Q16 | 0x04A38000 | Q16 = 1187.5 bps |
+| RDS_CARRIER_HZ | 57000 | — |
+| RDS_PILOT_HZ | 19000 | — |
+| Samples/symbol @228k | 192 (191.36 Q16) | Q16 |
+| Timing adjust limit | ±1/16 symbolu | ±6.25% |
+
+---
+
+## Decoder Core (RDSCore)
+
+Plik: `RDS/RDSCore.h`, `RDS/RDSCore.c`
+
+### Maszyna stanow
+
+```
+SEARCH ──(valid block A/B/C/D)──> PRE_SYNC
+                                    │
+                     (3 kolejne valid/corrected w sekwencji)
+                                    │
+                                    v
+                                  SYNC
+                                    │
+                      (flywheel_errors > 20)
+                                    │
+                                    v
+                                  LOST ──> SEARCH
+```
 
 #### SEARCH
-
-Cel:
-- szukac poprawnego 26-bitowego bloku bit po bicie w przesuwanym oknie,
-- dla kazdego nowego bitu liczyc syndrome dla ostatnich 26 bitow,
-- sprawdzac zgodnosc z offset words A, B, C, C' albo D.
-
-Wejscie do stanu:
-- start dekodera,
-- restart po zmianie czestotliwosci,
-- restart po overflow flywheel,
-- restart po dluzszej utracie lock.
-
-Przejscie SEARCH -> PRE_SYNC:
-- gdy znaleziony zostanie pierwszy blok uznany za valid albo corrected,
-- zapamietac jego typ offsetu i pozycje bitowa,
-- wyznaczyc, jaki blok powinien pojawic sie jako nastepny w sekwencji.
+- Sliding window bit po bicie, test syndromu dla wszystkich 5 typow blokow
+- Przejscie do PRE_SYNC: **tylko** gdy blok jest **Valid** (bez korekcji)
+- Jesli wiele typow pasuje → ambiguous → Invalid, pozostajemy w SEARCH
 
 #### PRE_SYNC
-
-Cel:
-- potwierdzic, ze pierwszy trafiony blok nie byl przypadkowym false positive,
-- sprawdzic, czy kolejny blok pojawia sie po dokladnie 26 bitach i ma poprawny nastepny offset.
-
-Regula synchronizacji:
-- dekoder uznajemy za zsynchronizowany dopiero po dwoch kolejnych poprawnych blokach w prawidlowej sekwencji,
-- to jest bezposrednio zgodne z filozofia SAA6588.
-
-Przejscie PRE_SYNC -> SYNC:
-- drugi kolejny blok po 26 bitach jest valid albo corrected,
-- jego typ offsetu zgadza sie z oczekiwana sekwencja.
-
-Przejscie PRE_SYNC -> SEARCH:
-- drugi blok nie pasuje,
-- drugi blok jest uncorrectable,
-- albo wykryta pozycja bitowa rozjechala sie wzgledem oczekiwanego kroku 26 bitow.
+- Wymagane **3 kolejne** bloki valid lub corrected w prawidlowej sekwencji (A→B→C/C'→D→A)
+- presync_consecutive++, advance expected_next_block
+- Jesli blok nie pasuje lub uncorrectable → restart do SEARCH
 
 #### SYNC
-
-Cel:
-- pracowac w trybie blokowym co 26 bitow zamiast przeszukiwania bit po bicie,
-- dekodowac bloki, korygowac bledy, skladac grupy i utrzymywac synchronizacje przez flywheel.
-
-Zasada:
-- po zlapaniu synchronizacji syndrome liczymy tylko na granicach oczekiwanych blokow,
-- pozycja bloku i oczekiwany offset sa juz przewidywalne.
-
-Przejscie SYNC -> LOST:
-- licznik flywheel przekroczy prog,
-- seria uncorrectable blocks wskazuje na utrate synchronizacji,
-- albo wykryto powtarzajace sie niespojne offsety mimo prob korekcji bit slip.
+- Dekodowanie co 26 bitow (nie sliding)
+- Valid/corrected → flywheel_errors = 0, handle block
+- Uncorrectable → flywheel_errors++ → bit slip retry (±1 bit)
+- C i C' sa wymienne na pozycji trzeciego bloku
 
 #### LOST
+- Emit SyncLost
+- Natychmiast restart do SEARCH
 
-Cel:
-- zarejestrowac utrate synchronizacji,
-- opublikowac zdarzenie do aplikacji,
-- wykonac szybki restart algorytmu bez zawieszania UI.
+### Kluczowe parametry synchronizacji
 
-Przejscie LOST -> SEARCH:
-- natychmiast po odnotowaniu zdarzenia lock_lost,
-- wyzerowac kontekst blokow, licznik flywheel, oczekiwany offset i lokalne okno bitowe,
-- rozpoczac nowe przesuwane szukanie.
-
-Wniosek implementacyjny:
-- stan LOST moze byc bardzo krotkim stanem technicznym,
-- ale warto go miec jawnie, bo upraszcza debug i logi.
+| Parametr | Wartosc | Uzasadnienie |
+|---|---|---|
+| RDS_PRESYNC_REQUIRED | **3** | Wiecej niz SAA6588 (2), mniej false positives |
+| RDS_DEFAULT_FLYWHEEL_LIMIT | **20** | Tolerancja na krótkie zaklocenia |
+| SEARCH acceptance | **Valid only** | Corrected w SEARCH daje za duzo false positives |
+| Bit slip retry | ±1 bit | Tylko w SYNC, przy failed expected block |
 
 ### Sekwencja blokow i offset words
 
-Warstwa linkowa RDS pracuje na blokach 26-bitowych:
-- 16 bitow danych,
-- 10 bitow checkword.
+Blok RDS = 26 bitow: 16 bitow danych + 10 bitow checkword.
+Cztery bloki tworza grupe 104-bit: A → B → C (lub C') → D.
 
-Cztery kolejne bloki tworza grupe 104-bit:
-- A, B, C, D dla grup typu A,
-- A, B, C', D dla grup typu B.
+Generator polynomial: g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1 (binarnie: 10110111001 = 0x5B9)
 
-Generator polynomial dla checkword:
-- g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
-
-Postac binarna wielomianu:
-- 10110111001
-
-Stale offset words dla RDS:
+Stale offset words:
 - A = 0x0FC
 - B = 0x198
 - C = 0x168
 - C' = 0x350
 - D = 0x1B4
 
-Uwagi:
-- w RBDS istnieje tez offset E = 0x000,
-- dla pierwszej implementacji mozemy skupic sie na klasycznym RDS: A, B, C, C', D.
+### Obliczanie syndromu
 
-Sekwencja oczekiwana podczas synchronizacji:
-- po A oczekiwany jest B,
-- po B oczekiwany jest C albo C',
-- po C oczekiwany jest D,
-- po C' oczekiwany jest D,
-- po D oczekiwany jest A.
+Szybka metoda tablicowa (sliced, 4 LUT):
+- 3 x 256-entry uint16_t dla bitow [7:0], [15:8], [23:16]
+- 1 x 4-entry uint16_t dla bitow [25:24]
+- Wynik: XOR wszystkich czesciowych syndromow
+- Tablice generowane raz przy init (rds_core_build_syndrome_tables)
 
-Wniosek praktyczny:
-- trzeci blok grupy jest specjalny,
-- dopuszcza dwa poprawne offsety: C dla wersji A albo C' dla wersji B,
-- stan synchronizacji musi to akceptowac bez gubienia lock.
+### Korekcja bledow
 
-### Syndrome i reguly walidacji bloku
+Burst errors o dlugosci 1 do 5 bitow:
+- 120 wpisow w tablicy korekcji (26 + 25 + 24 + 23 + 22)
+- Lookup: error_syndrome = syndrome XOR expected_offset
+- Jesli error_syndrome jest w tablicy → popraw bity, zweryfikuj ponownie
+- Per syndrome zapamietany wpis z minimalnym burst_length (lepsze dopasowanie)
 
-Dla odebranego slowa 26-bitowego r(x):
-- syndrome = r(x) mod g(x)
+Procedura:
+1. Oblicz syndrome odebranego 26-bit slowa
+2. Jezeli syndrome == expected_offset → **Valid**
+3. Oblicz error_syndrome = syndrome XOR expected_offset
+4. Lookup w tablicy korekcji
+5. Jesli znaleziony: popraw bity, przelicz syndrome → jesli OK → **Corrected**
+6. W przeciwnym razie → **Uncorrectable**
 
-Blok jest uznany za valid, gdy:
-- syndrome == expected_offset
+### Bit-slip correction
 
-Podczas SEARCH:
-- expected_offset nie jest jeszcze znany,
-- sprawdzamy zgodnosc z kazdym z offset words A, B, C, C', D.
+- Aktywna tylko w stanie SYNC
+- Jesli blok nie pasuje do oczekiwanego typu:
+  - Proba z oknem przesuniętym o 1 bit (bit_history >> 1)
+  - Jesli shifted window dekoduje poprawnie i pasuje do expected → accept
+  - Inkrementacja bit_slip_repairs
+  - Reset bit_phase
 
-Podczas PRE_SYNC i SYNC:
-- expected_offset wynika z aktualnej pozycji w sekwencji blokow,
-- test validacji jest ostrzejszy, bo sprawdzamy tylko oczekiwany typ bloku.
+### Skladanie PS (grupy 0A/0B)
 
-Wlasnosc liniowa przydatna do korekcji:
-- syndrome(received) = expected_offset xor syndrome(error)
-
-Czyli:
-- error_syndrome = syndrome(received) xor expected_offset
-
-To pozwala zbudowac tablice korekcji:
-- dla wszystkich dopuszczalnych wzorcow bledow e(x) liczymy syndrome(e),
-- jesli error_syndrome pasuje do wpisu w tabeli, wiemy, ktore bity odwrocic.
-
-### Korekcja bledow blokow A, B, C, C', D
-
-Minimalny model zgodny z duchem SAA6588:
-- valid: blok bez bledow,
-- corrected: blok poprawiony na podstawie syndrome,
-- uncorrectable: blok z bledem poza zakresem korekcji.
-
-Zakres korekcji planowany dla pierwszej pelnej wersji:
-- burst errors o dlugosci do 5 bitow w obrebie 26-bitowego bloku,
-- zgodnie z typowa praktyka RDS i opisem SAA6588.
-
-Strategia implementacyjna:
-- precompute lookup table dla burst error patterns o dlugosci 1 do 5,
-- dla kazdego wzorca zapamietac:
-- mask_error_bits,
-- syndrome(error),
-- burst_length,
-- first_bit_index.
-
-Procedura korekcji jednego bloku:
-1. policzyc syndrome odebranego 26-bit slowa,
-2. porownac z expected_offset,
-3. jesli pasuje, status = valid,
-4. jesli nie pasuje, policzyc error_syndrome = syndrome xor expected_offset,
-5. sprawdzic tablice korekcji,
-6. jesli znaleziono dopasowanie, odwrocic wskazane bity i status = corrected,
-7. jesli nie znaleziono dopasowania, status = uncorrectable.
-
-Wniosek implementacyjny:
-- korekcja musi dzialac na warstwie block decoder, nie w parserze grup,
-- parser PI, PS, RT i innych pol powinien dostawac tylko bloki valid albo corrected.
-
-### Flywheel i bit slip correction
-
-Flywheel dla utrzymania synchronizacji:
-- aktywny tylko w stanie SYNC,
-- valid lub corrected block zmniejsza licznik bledow,
-- uncorrectable block zwieksza licznik bledow,
-- po przekroczeniu progu przejscie do LOST.
-
-Rekomendacja startowa dla progu flywheel:
-- start od wartosci 8 do 12,
-- domyslnie 8 dla szybszej reakcji podczas debug,
-- pozniej mozna poluznic, jesli okaze sie zbyt agresywny.
-
-Bit slip correction:
-- jesli w SYNC oczekiwany blok nie przechodzi walidacji,
-- sprawdzic wariant nominalny,
-- sprawdzic blok przesuniety o +1 bit,
-- sprawdzic blok przesuniety o -1 bit,
-- jesli jedna z tych wersji daje valid albo corrected dla oczekiwanego offsetu, skorygowac faze bitowa i pozostac w SYNC.
-
-Wniosek:
-- bit slip correction powinna byc uruchamiana oszczednie,
-- najlepiej tylko wtedy, gdy jakosc lock spada,
-- nie jako stale skanowanie wszystkich wariantow dla kazdego bloku.
-
-### Budowa tabeli korekcji burst error
-
-Docelowo tablica korekcji nie powinna byc wpisywana recznie.
-
-Algorytm generacji tabeli dla burst errors o dlugosci 1 do 5:
-1. dla kazdej dlugosci burst `L` od 1 do 5,
-2. dla kazdej pozycji startowej `p` od 0 do `26 - L`,
-3. zbudowac 26-bitowa maske bledu z `L` kolejnymi jedynkami,
-4. policzyc syndrome dla tej maski,
-5. zapisac wpis: `syndrome -> maska, burst_length, first_bit_index`.
-
-Liczba wzorcow do wygenerowania:
-- dla `L = 1`: 26,
-- dla `L = 2`: 25,
-- dla `L = 3`: 24,
-- dla `L = 4`: 23,
-- dla `L = 5`: 22,
-- razem: 120 wpisow.
-
-Wniosek praktyczny:
-- tabela jest mala,
-- mozna ja generowac offline i wkleic jako `static const`,
-- albo generowac raz przy starcie modulu i zachowac w RAM.
-
-Rekomendacja dla tego projektu:
-- wygenerowac ja offline i trzymac jako `static const`,
-- unikamy kosztu startowego i ryzyka roznic miedzy buildami,
-- latwiej tez testowac poprawne syndromy na hostowym skrypcie.
-
-Minimalny kontrakt wpisu tabeli:
-- `syndrome10`,
-- `mask26`,
-- `burst_length`,
-- `first_bit_index`.
-
-Wymaganie testowe:
-- generator tabeli musi byc sprawdzony na zestawie kontrolnym,
-- dla kazdego wpisu po poprawce blok ma dawac `syndrome == expected_offset`.
-
-### Kontrakt zdarzen RDSCore -> radio.c
-
-RDSCore nie powinien bezposrednio modyfikowac UI ani stanu aplikacji FM.
-
-Zamiast tego powinien publikowac lekkie zdarzenia:
-- `DecoderStarted`,
-- `PilotDetected`,
-- `RdsCarrierDetected`,
-- `SyncAcquired`,
-- `SyncLost`,
-- `PiUpdated`,
-- `PsUpdated`,
-- `PtyUpdated`,
-- `BlockStatsUpdated`.
-
-Minimalna struktura zdarzenia:
-- `type`,
-- `tick_ms`,
-- `pi`,
-- `ps[9]`,
-- `pty`,
-- `sync_state`,
-- `block_counters`.
-
-Zasada publikacji:
-- `PiUpdated` tylko przy zmianie stabilnego PI,
-- `PsUpdated` dopiero po potwierdzeniu kompletnego i stabilnego 8-znakowego PS,
-- `SyncLost` tylko przy realnej utracie lock, nie przy pojedynczym slabym bloku,
-- `BlockStatsUpdated` rzadko, np. co 250 ms albo co 500 ms.
-
-Wniosek architektoniczny:
-- `radio.c` powinno dostawac juz odfiltrowane zdarzenia wysokiego poziomu,
-- dzieki temu dekoder nie zaleje glownej petli i nie utrudni debugowania UI.
-
-### Szkic struktury RDSCore
-
-Proponowany podzial struktur:
-
-```c
-#define RDS_PS_LEN 8U
-#define RDS_RT_LEN 64U
-#define RDS_EVENT_QUEUE_SIZE 8U
-
-typedef enum {
-	RdsSyncStateSearch = 0,
-	RdsSyncStatePreSync,
-	RdsSyncStateSync,
-	RdsSyncStateLost,
-} RdsSyncState;
-
-typedef enum {
-	RdsBlockTypeUnknown = 0,
-	RdsBlockTypeA,
-	RdsBlockTypeB,
-	RdsBlockTypeC,
-	RdsBlockTypeCp,
-	RdsBlockTypeD,
-} RdsBlockType;
-
-typedef enum {
-	RdsBlockStatusInvalid = 0,
-	RdsBlockStatusValid,
-	RdsBlockStatusCorrected,
-	RdsBlockStatusUncorrectable,
-} RdsBlockStatus;
-
-typedef enum {
-	RdsEventTypeNone = 0,
-	RdsEventTypeDecoderStarted,
-	RdsEventTypePilotDetected,
-	RdsEventTypeRdsCarrierDetected,
-	RdsEventTypeSyncAcquired,
-	RdsEventTypeSyncLost,
-	RdsEventTypePiUpdated,
-	RdsEventTypePsUpdated,
-	RdsEventTypeRtUpdated,
-	RdsEventTypePtyUpdated,
-	RdsEventTypeBlockStatsUpdated,
-} RdsEventType;
-
-typedef struct {
-	uint32_t raw26;
-	uint16_t data16;
-	uint16_t syndrome10;
-	uint16_t expected_offset10;
-	uint16_t error_syndrome10;
-	uint32_t correction_mask26;
-	RdsBlockType type;
-	RdsBlockStatus status;
-	uint8_t corrected_bits;
-} RdsBlock;
-
-typedef struct {
-	RdsBlock blocks[4];
-	uint8_t count;
-	uint16_t pi;
-	uint8_t group_type;
-	bool version_b;
-	bool complete;
-} RdsGroup;
-
-typedef struct {
-	char ps[RDS_PS_LEN + 1U];
-	char ps_candidate[RDS_PS_LEN + 1U];
-	char rt[RDS_RT_LEN + 1U];
-	char rt_candidate[RDS_RT_LEN + 1U];
-	uint16_t pi;
-	uint16_t rt_segment_mask;
-	uint8_t pty;
-	uint8_t rt_length;
-	bool rt_ab_flag;
-	bool tp;
-	bool ta;
-	bool ps_ready;
-	bool rt_ready;
-} RdsProgramInfo;
-
-typedef struct {
-	uint16_t syndrome10;
-	uint32_t mask26;
-	uint8_t burst_length;
-	uint8_t first_bit_index;
-} RdsCorrectionEntry;
-
-typedef struct {
-	RdsEventType type;
-	uint32_t tick_ms;
-	uint16_t pi;
-	char ps[RDS_PS_LEN + 1U];
-	char rt[RDS_RT_LEN + 1U];
-	uint8_t pty;
-	RdsSyncState sync_state;
-	uint32_t total_blocks;
-	uint32_t valid_blocks;
-	uint32_t corrected_blocks;
-	uint32_t uncorrectable_blocks;
-} RdsEvent;
-
-typedef struct {
-	RdsSyncState sync_state;
-	RdsBlockType expected_next_block;
-	uint8_t block_index_in_group;
-	uint8_t flywheel_errors;
-	uint8_t flywheel_limit;
-
-	uint32_t bit_window;
-	uint64_t bit_history;
-	uint8_t bit_count;
-	int8_t bit_phase;
-
-	float pilot_level;
-	float rds_band_level;
-	float lock_quality;
-
-	uint32_t total_blocks;
-	uint32_t valid_blocks;
-	uint32_t corrected_blocks;
-	uint32_t uncorrectable_blocks;
-	uint32_t sync_losses;
-	uint32_t bit_slip_repairs;
-
-	RdsGroup current_group;
-	RdsProgramInfo program;
-	uint8_t ps_segment_mask;
-	bool slip_retry_pending;
-	RdsEvent event_queue[RDS_EVENT_QUEUE_SIZE];
-	uint8_t event_read_idx;
-	uint8_t event_write_idx;
-	uint8_t event_count;
-} RDSCore;
+```
+segment = block_b & 0x03   (0-3)
+ps_candidate[segment*2 : segment*2+1] = block_d high/low bytes
 ```
 
-Minimalny zestaw funkcji dla RDSCore:
+**Wyswietlanie inkrementalne**: kazdy segment kopiowany do ps[] natychmiast po odebraniu.
+PsUpdated emitowane po kazdym segmencie, nie dopiero po zebraniu wszystkich 4.
+ps_segment_mask = bitmask 0x0F, resetowany po zebraniu wszystkich.
 
+### Skladanie RT (grupy 2A/2B)
+
+- RT A/B flag: zmiana → czyszczenie bufora
+- V1.0 (2A): 4 znaki na segment, 16 segmentow, max 64 znaki
+- V2.0 (2B): 2 znaki na segment, 8 segmentow, max 32 znaki
+- RtUpdated emitowane po zebraniu wszystkich segmentow i wykryciu zmiany
+
+---
+
+## System zdarzen
+
+Circular event queue, 8 slotow, FIFO z odrzucaniem najstarszych przy overflow.
+
+Typy zdarzen:
+
+| Zdarzenie | Kiedy emitowane |
+|---|---|
+| DecoderStarted | start modulu |
+| PilotDetected | pilot_level_q8 > RDS_PILOT_LEVEL_MIN_Q8 (5120 = 20.0) |
+| RdsCarrierDetected | rds_band_level_q8 > RDS_BAND_LEVEL_MIN_Q8 (5120) |
+| SyncAcquired | presync_consecutive osiagnal 3 |
+| SyncLost | flywheel_errors > 20 |
+| PiUpdated | zmiana PI |
+| PsUpdated | nowy segment PS (inkrementalnie) |
+| RtUpdated | kompletny nowy RadioText |
+| PtyUpdated | zmiana PTY |
+| BlockStatsUpdated | aktualizacja statystyk blokow |
+
+Struktura zdarzenia:
+- type, tick_ms, pi, ps[9], rt[65], pty, sync_state, total/valid/corrected/uncorrectable blocks
+
+Zasada: radio.c konsumuje zdarzenia przez rds_core_pop_event() i aktualizuje UI.
+
+---
+
+## Flaga kompilacji ENABLE_RDS
+
+W radio.c zdefiniowana flaga:
 ```c
-void rds_core_reset(RDSCore* core);
-void rds_core_restart_sync(RDSCore* core);
-void rds_core_push_bit(RDSCore* core, uint8_t bit);
-bool rds_core_consume_demod_bit(RDSCore* core, uint8_t bit, RdsBlock* decoded_block);
-bool rds_core_try_decode_block(RDSCore* core, RdsBlock* block, uint32_t raw26);
-void rds_core_handle_block(RDSCore* core, const RdsBlock* block);
-void rds_core_handle_group(RDSCore* core, const RdsGroup* group);
-bool rds_core_pop_event(RDSCore* core, RdsEvent* event);
+#define ENABLE_RDS 1   // 0 = wylacza caly kod RDS
 ```
 
-Podzial odpowiedzialnosci:
-- front-end DSP produkuje strumien bitow po DBPSK,
-- RDSCore zajmuje sie tylko warstwa linkowa i parserem grup,
-- aplikacja FM dostaje juz przetworzone zdarzenia i ustabilizowane pola typu PI i PS.
+Gdy ENABLE_RDS=0:
+- brak linkowania modulow RDS (includes, init, cleanup)
+- brak pozycji RDS w menu konfiguracji
+- brak pola PS/RT na ekranie
+- kompiluje sie czysto (sprawdzone)
 
-Wniosek architektoniczny:
-- taki podzial jest zgodny i z SAA6588, i z rozsadowa architektura software,
-- pozwala testowac osobno:
-- tor DSP,
-- block decoder,
-- parser grup,
-- warstwe UI.
+Gdy ENABLE_RDS=1:
+- pelna funkcjonalnosc RDS
+- opcja RDS On/Off w menu konfiguracji
+- wyswietlanie PS na ekranie
 
-Plan implementacyjny dla kodu:
-- `RDS/RDSCore.h`: definicje typow, struktur i API rdzenia,
-- `RDS/RDSCore.c`: maszyna stanow, liczniki, kolejka pojedynczego zdarzenia i dekoder blokow,
-- przyszle rozszerzenie: `RDS/RDSDsp.h/.c` dla toru I/Q i synchronizacji symbolowej.
+---
 
-### Aktualny status implementacji
+## Statystyki i diagnostyka
 
-Stan na teraz dla `RDSCore`:
+### Metryki RDSAcquisition
 
-Juz zaimplementowane:
-- struktury i API rdzenia w `RDS/RDSCore.h`,
-- maszyna stanow `SEARCH -> PRE_SYNC -> SYNC -> LOST`,
-- liczenie syndrome dla 26-bitowych blokow,
-- rozpoznawanie blokow `A/B/C/C'/D`,
-- korekcja burst errors do 5 bitow przez tablice korekcji,
-- statusy `valid`, `corrected`, `uncorrectable`,
-- flywheel do utrzymania synchronizacji,
-- `bit slip correction` w dwoch kierunkach: natychmiastowy retry dla -1 bit i opozniony retry dla +1 bit,
-- szybsze odzyskiwanie synchronizacji przez `fast resync`,
-- skladanie grup z blokow `A/B/C(C')/D`,
-- parser grup `0A/0B` dla `PI`, `PS`, `PTY`, `TP`, `TA`,
-- parser grup `2A/2B` dla `RadioText`,
-- ring buffer zdarzen (zamiast pojedynczego `pending_event`) i odczyt FIFO przez `rds_core_pop_event()`,
-- zdarzenia `PiUpdated`, `PsUpdated`, `RtUpdated`, `PtyUpdated`, `SyncAcquired`, `SyncLost`,
-- wejscie bitowe z DSP do rdzenia przez `rds_core_consume_demod_bit()`.
+- configured_sample_rate_hz (228000)
+- measured_sample_rate_hz (z pomiaru timingowego)
+- adc_midpoint (poziom DC)
+- dma_half_events, dma_full_events (liczniki przerwan)
+- delivered_blocks, dropped_blocks (backpressure)
+- pending_blocks, pending_peak_blocks
+- adc_overrun_count
 
-To oznacza, ze warstwa linkowa i parser grup sa juz w duzej mierze gotowe.
+### Metryki RDSCore
 
-Jeszcze niezaimplementowane:
-- rzeczywisty tor DSP od probek ADC do bitow `0/1`,
-- wydzielenie tego toru do osobnego modulu `RDS/RDSDsp.h/.c`,
-- doprowadzenie realnych bitow z demodulatora do `rds_core_consume_demod_bit()`,
-- integracja zdarzen `RDSCore` z `radio.c`,
-- opcja `RDS On/Off` w menu konfiguracji,
-- wyswietlanie `PS` i pozniej `RT` w UI aplikacji,
-- debug dump z prawdziwego runtime na karte SD,
-- testy offline dla znanych ramek RDS oraz testy z rzeczywistym MPX,
-- ewentualne rozszerzenia na dalsze grupy: `CT`, `AF`, `EON`, `TA/TP` logika wyzszego poziomu.
+- total_blocks, valid_blocks, corrected_blocks, uncorrectable_blocks
+- sync_losses
+- bit_slip_repairs
+- sync_state (aktualny stan maszyny)
+- pilot_detected, rds_carrier_detected (bool)
 
-Wniosek:
-- `RDSCore` nie jest jeszcze pelnym systemem RDS,
-- ale jest juz prawie pelna warstwa linkowa i parser podstawowych grup,
-- najwieksza brakujaca czesc przed integracja z aplikacja to front-end DSP.
+### Metryki RDSDsp
 
-Rekomendowana kolejnosc dalszych prac:
-1. zbudowac `RDSDsp` produkujacy stabilne bity do `rds_core_consume_demod_bit()`,
-2. podlaczyc zdarzenia `RDSCore` do `radio.c`,
-3. uruchomic pierwsza prezentacje `PI/PS` w UI,
-4. potem dopiero stroic `RadioText`, jakosc lock i debug dump runtime.
+- symbol_count (calkowita liczba zdemodulowanych symboli)
+- block_confidence_avg_q16 (srednia jakosc bloku, Q16 0-65535)
+- symbol_confidence_avg_q16 (srednia jakosc decyzji, Q16)
+- pilot_level_q8, rds_band_level_q8, avg_abs_hp_q8
 
-## Plan firmware
+---
 
-Etap 1:
-- uruchomic ADC na PA4
-- zrzucac MPX do bufora DMA
-- zapisac probki do debug loga lub prostego dumpa do analizy offline
+## Porownanie z SAA6588 — szczegolowe odniesienia
 
-Etap 2:
-- potwierdzic widmo: pilot 19 kHz, skladnik stereo, nosna 57 kHz RDS
+SAA6588 jako wzorzec architektury — elementy przejete koncepcyjnie:
 
-Etap 3:
-- napisac cyfrowy front-end RDS
-- wydzielic kanal 57 kHz
-- uruchomic pierwsza detekcje bitow
+1. **Pasmowe wydzielenie 57 kHz** — u nas: MCP6001 HPF + cyfrowy mixer + 3-pole IIR LPF
+2. **Regeneracja nosnej** — u nas: NCO carrier_phase_q32, fast path przy 228k (direct demux)
+3. **Integracja po symbolu** — u nas: integrator I/Q z 192 probkami na symbol
+4. **Detekcja roznicowa bitow** — u nas: dot product prev/curr, DBPSK
+5. **Syndrome-based block detection** — u nas: sliced LUT (4 tablice), 0x5B9 polynomial
+6. **Korekcja burst errors** — u nas: tablica 120 wpisow, burst 1-5 bit
+7. **Synchronizacja po sekwencji** — u nas: 3 kolejne bloki (wiecej niz SAA6588: 2)
+8. **Flywheel** — u nas: limit 20 (szerzej niz typowe 8-12, lepsza tolerancja na krótkie zaklocenia)
+9. **Bit-slip correction** — u nas: ±1 bit retry w SYNC
+10. **Metryki jakosci** — u nas: pilot_level, rds_band, confidence — wszystko Q8/Q16 integer
 
-Etap 4:
-- dekodowac grupy RDS
-- pokazac podstawowe pola: PI, PS, RT, PTY
+Elementy, ktorych NIE kopiujemy z SAA6588:
+- analogowy switched-capacitor band-pass filter (u nas: cyfrowy)
+- comparator sprzetowy (u nas: software decision)
+- presync=2 (u nas: 3, mniej false positives)
+- szczegoly I2C/DAVN rejestrowe
 
-Etap 5:
-- zoptymalizowac obciazenie CPU
-- sprawdzic czy implementacja nie psuje responsywnosci aplikacji FM
-
-### Budzet danych dla runtime i debugu
-
-Przy 228 kS/s i probkach uint16_t:
-- strumien danych ADC = 228000 x 2 B/s = 456000 B/s
-- czyli okolo 445 KiB/s
-
-Wniosek:
-- ciagly dump wszystkiego do pliku nie powinien byc aktywny stale w normalnym runtime,
-- raw dump musi byc trybem diagnostycznym uruchamianym czasowo,
-- w normalnym trybie pracy nalezy zapisywac tylko lekkie logi zdarzen dekodera.
-
-## Proponowany format plikow debug dump
-
-Lokalizacja katalogu:
-- /ext/apps_data/fmradio_controller_pt2257/rds_debug/
-
-Rekomendowany uklad plikow jednej sesji debug:
-- session_meta.txt
-- mpx_adc_u16le.raw
-- rds_events.csv
-
-### 1. session_meta.txt
-
-Czytelny tekstowy plik metadanych, format key=value, np.:
-- app_version=
-- utc_or_tick=
-- station_freq_10khz=
-- sample_rate_hz=228000
-- adc_bits=12
-- adc_storage=u16le
-- adc_pin=PA4
-- adc_channel=ADC1_IN9
-- input_mode=dc_offset_only albo mcp6001_x4
-- dc_bias_mv=
-- gain_nominal=
-- dma_samples=2048
-- block_samples=1024
-
-Cel:
-- szybka diagnoza bez potrzeby domyslania sie parametrow nagrania.
-
-### 2. mpx_adc_u16le.raw
-
-Format:
-- surowe probki ADC,
-- little-endian,
-- jedna probka = uint16_t,
-- wartosci 0 do 4095 zapisane w 16 bitach.
-
-Powod:
-- format jest prosty do zrzutu,
-- latwy do otwarcia w Pythonie, MATLABie, Octave albo Audacity po konwersji,
-- nie traci informacji o rzeczywistym poziomie offsetu DC i clippingu.
-
-Uwagi:
-- ten plik zapisujemy tylko w trybie diagnostycznym,
-- jedna sesja dumpa powinna miec ograniczony czas, np. kilka sekund.
-
-### 3. rds_events.csv
-
-Format CSV, jedna linia na zdarzenie lub probe diagnostyczna wyzszego poziomu.
-
-Proponowane kolumny:
-- tick_ms
-- event
-- pi_hex
-- ps
-- pty
-- block_ok
-- block_err
-- sync_state
-- pilot_detected
-- rds57_detected
-
-Przykladowe zdarzenia:
-- decoder_start
-- pilot_lock
-- rds_lock
-- ps_update
-- sync_lost
-- decoder_stop
-
-Cel:
-- szybko zobaczyc, czy dekoder w ogole lapie pilot, 57 kHz i poprawne bloki,
-- nie trzeba analizowac surowego RAW przy kazdym problemie.
+---
 
 ## Wymagania PCB
 
-Na PCB nalezy przewidziec:
-- polaczenie MPX z TEA5767 do sekcji RDS
-- wejscie na PA4 oznaczone jako RDS_MPX_ADC
-- footprint pod prosty tor offsetu DC
-- footprint pod MCP6001 i rezystory ustawiajace wzmocnienie
-- mozliwosc obejscia aktywnego wzmacniacza na czas pierwszych testow
+Na PCB v1.1 przewidziane:
+- polaczenie MPXO z TEA5767 pin 25 do sekcji RDS MCP6001
+- wyjscie MCP6001 do PA4 (Flipper pin 4) oznaczone jako RDS_MPX_ADC
+- footprint MCP6001 (SOT-23-5) z rezystorami wzmocnienia (Rf, Rg)
+- footprint HPF (C2, R1) i bias divider (Rb1, Rb2, Cb)
+- coupling cap C1 = 1 uF
+- bypass C4 = 100 nF przy VDD MCP6001
+- zasilanie MCP6001: 3.3V_TEA (z LDO TEA)
 
-## Finalna decyzja projektowa na teraz
+---
 
-Na obecnym etapie przyjmujemy:
-- fizyczne wyprowadzenie MPX do pin 4 / PA4 / ADC1_IN9
-- w planie PCB opisac tylko to polaczenie i rezerwacje pinu
-- szczegoly analog front-end i firmware dekodera RDS prowadzic w tym osobnym planie
-- domyslny sample rate runtime: 228 kS/s
-- domyslny bufor DMA: 2048 probek z obrobka blokow po 1024 probki
-- docelowy budzet RAM modulu RDS: okolo 12 KB
-- surowy dump ADC tylko w trybie diagnostycznym, nie stale w runtime
+## Proponowany format plikow debug dump
+
+Lokalizacja: `/ext/apps_data/fmradio_controller_pt2257/rds_debug/`
+
+Pliki jednej sesji:
+
+### session_meta.txt
+```
+app_version=
+utc_or_tick=
+station_freq_10khz=
+sample_rate_hz=228000
+adc_bits=10
+adc_storage=u16le
+adc_pin=PA4
+adc_channel=ADC1_IN9
+input_mode=mcp6001_x6
+dc_bias_mv=1650
+gain_nominal=6
+dma_samples=2048
+block_samples=1024
+```
+
+### mpx_adc_u16le.raw
+- surowe probki ADC, little-endian uint16_t
+- wartosc 0 do 2048 (10-bit ADC)
+- tylko tryb diagnostyczny, ograniczony czas (kilka sekund)
+
+### rds_events.csv
+Kolumny: tick_ms, event, pi_hex, ps, pty, block_ok, block_err, sync_state, pilot_detected, rds57_detected
+
+---
+
+## Historia dokumentu
+
+Ten dokument zostal pierwotnie stworzony jako plan implementacji RDS.
+Po pelnej implementacji zaktualizowany do stanu zgodnego z kodem zrodlowym (RDS/RDSDsp.c, RDS/RDSCore.c, RDS/RDSAcquisition.c).
+
+Wazna zmiana: wczesne pomiary z modulu RRD-102BC sugerowaly "wariant startowy" bez kondensatora odsprzegajacego i bez dzielnika bias. Te wnioski okazaly sie bledne — w finalnym projekcie uzywamy C1=1uF, dzielnika Rb1/Rb2=100k i wzmocnienia x6 na MCP6001. Stare wnioski pomiarowe zostaly usuniete z dokumentu.
