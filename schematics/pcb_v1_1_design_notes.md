@@ -653,6 +653,10 @@ Najwazniejsze zmiany funkcjonalne:
 
 ## Sekcja RDS Analog Front-End z MCP6001
 
+Schemat obwodu RDS front-end z MCP6001:
+
+![MCP6001 RDS preamplifier schematic](pdfimages/MCP6001/mcp6001_schematic.png)
+
 ### Cel
 
 Wzmocnic skladowa RDS (57 kHz) z wyjscia MPXO TEA5767 przed podaniem na ADC PA4 Flippera.

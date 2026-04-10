@@ -35,9 +35,8 @@ out/
 # Dev tools & test data
 tools/
 
-# Extracted PDF text and images (large, regenerable)
+# Extracted PDF text (large, regenerable)
 schematics/pdftext/
-schematics/pdfimages/
 
 # RDS runtime artifacts (captured from Flipper)
 rds_capture_*.raw
