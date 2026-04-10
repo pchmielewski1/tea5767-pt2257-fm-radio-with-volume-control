@@ -1,5 +1,9 @@
 # PCB v1.1 Design Notes
 
+Schemat glownego polaczenia PCB v1.1:
+
+![PCB v1.1 schematic](svg/Schematic_radio+tea5767_1_1_2026-04-10.svg)
+
 ## Cel zmian
 
 Wersja 1.1 ma rozwiazac trzy glowne problemy obecnej plytki:
