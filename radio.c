@@ -1670,6 +1670,12 @@ static void fmradio_rds_runtime_reset(void) {
 #endif
 }
 
+/*
+ * NOTE: fmradio_rds_pipeline_start is called only during init or TEA startup.
+ * It does NOT execute on the hot path (ISR → decoder).
+ * The hot path remains: ADC ISR → fmradio_rds_acquisition_block_callback →
+ * rds_dsp_process_block → fmradio_rds_symbol_callback, staying under 8.192ms.
+ */
 static void fmradio_rds_pipeline_start(void) {
     fmradio_rds_runtime_reset();
 
