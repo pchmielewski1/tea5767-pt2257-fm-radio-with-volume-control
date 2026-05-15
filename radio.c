@@ -108,10 +108,15 @@ static bool fmradio_rds_acquisition_realtime_block_callback(
     size_t count,
     uint16_t adc_midpoint,
     void* context);
-static bool fmradio_rds_adc_start(void);
 static void fmradio_rds_adc_stop(void);
 static void fmradio_rds_adc_timer_callback(void* context);
 static bool fmradio_rds_pipeline_enabled(void);
+static void fmradio_rds_pipeline_start(void);
+static void fmradio_rds_symbol_callback(
+    void* context,
+    int32_t symbol_i,
+    int32_t symbol_q,
+    uint32_t confidence_q16);
 static void fmradio_rds_timer_stop(void);
 static void fmradio_rds_update_ui_snapshot(void);
 static const char* fmradio_rds_sync_short_text(RdsSyncState state);
@@ -1665,6 +1670,34 @@ static void fmradio_rds_runtime_reset(void) {
 #endif
 }
 
+static void fmradio_rds_pipeline_start(void) {
+    fmradio_rds_runtime_reset();
+
+    rds_core_set_tick_ms(&rds_core, furi_get_tick());
+    rds_core_reset(&rds_core);
+    rds_dsp_init(&rds_dsp, RDS_ACQ_TARGET_SAMPLE_RATE_HZ);
+    rds_dsp_set_symbol_callback(&rds_dsp, fmradio_rds_symbol_callback, NULL);
+    rds_dsp_set_manual_carrier_offset_centihz(&rds_dsp, rds_carrier_offset_centihz);
+
+    rds_acquisition_init(
+        &rds_acquisition,
+        rds_adc_pin,
+        rds_adc_channel,
+        RDS_ADC_FIXED_MIDPOINT,
+        fmradio_rds_acquisition_block_callback,
+        NULL);
+    rds_acquisition_set_realtime_block_callback(
+        &rds_acquisition,
+        fmradio_rds_acquisition_realtime_block_callback,
+        NULL);
+
+    if(!fmradio_rds_capture_writer_start()) {
+        FURI_LOG_E(TAG, "Failed to start RDS capture writer");
+    }
+
+    fmradio_rds_clear_station_name();
+}
+
 static bool fmradio_rds_pipeline_enabled(void) {
     return rds_enabled || rds_debug_enabled;
 }
@@ -1699,8 +1732,7 @@ static void fmradio_rds_apply_runtime_state(bool reset_decoder) {
 
     if(fmradio_rds_pipeline_enabled() && tea_i2c_ready) {
         if(!stats.running) {
-            fmradio_rds_runtime_reset();
-            (void)fmradio_rds_adc_start();
+            fmradio_rds_pipeline_start(); // includes runtime reset, decoder init, acquisition init, writer start
         }
         fmradio_rds_timer_start();
     } else {
@@ -2037,16 +2069,6 @@ static void fmradio_rds_acquisition_block_callback(
     fmradio_rds_process_adc_block(samples, count, adc_midpoint);
 }
 
-static bool fmradio_rds_adc_start(void) {
-    bool started = rds_acquisition_start(&rds_acquisition);
-    if(!started) {
-        FURI_LOG_W(TAG, "RDS acquisition start failed");
-    } else {
-        rds_runtime_sample_rate_hz = 0U;
-        fmradio_rds_refresh_runtime_sample_rate(true);
-    }
-    return started;
-}
 
 static void fmradio_rds_adc_stop(void) {
     rds_acquisition_stop(&rds_acquisition);
@@ -2804,7 +2826,11 @@ static void fmradio_tick_callback(void* context) {
             fmradio_state_unlock();
 
             if(!was_ready) {
-                fmradio_rds_apply_runtime_state(false);
+                fmradio_rds_pipeline_start();
+                // Start timer so worker can begin processing
+                if(rds_adc_timer_handle && !rds_adc_timer_running) {
+                    fmradio_rds_timer_start();
+                }
             }
         } else {
             bool stop_rds = false;
@@ -3165,25 +3191,7 @@ FMRadio* fmradio_controller_alloc() {
     if(!fmradio_submenu_rebuild(app)) goto fail;
 
 #ifdef ENABLE_RDS
-    rds_core_set_tick_ms(&rds_core, furi_get_tick());
-    rds_core_reset(&rds_core);
-    rds_dsp_init(&rds_dsp, RDS_ACQ_TARGET_SAMPLE_RATE_HZ);
-    rds_dsp_set_symbol_callback(&rds_dsp, fmradio_rds_symbol_callback, NULL);
-    rds_dsp_set_manual_carrier_offset_centihz(&rds_dsp, rds_carrier_offset_centihz);
-    fmradio_rds_constellation_clear_history();
-    rds_acquisition_init(
-        &rds_acquisition,
-        rds_adc_pin,
-        rds_adc_channel,
-        RDS_ADC_FIXED_MIDPOINT,
-        fmradio_rds_acquisition_block_callback,
-        NULL);
-    rds_acquisition_set_realtime_block_callback(
-        &rds_acquisition,
-        fmradio_rds_acquisition_realtime_block_callback,
-        NULL);
-    if(!fmradio_rds_capture_writer_start()) goto fail;
-    fmradio_rds_clear_station_name();
+    fmradio_rds_pipeline_start();
 #endif
 
     // Apply backlight policy after loading settings
